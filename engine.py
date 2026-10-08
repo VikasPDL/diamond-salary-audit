@@ -371,30 +371,26 @@ def build(master, salary_rows, bank, prod, pdf_emps, month_days, period, toleran
 
 TRANSFER_OTHER = "Transfer to Other Account"
 
-# Outcome part of the remark ("<Department> - <outcome>"), used for the pivot columns
-OUTCOMES = ["Staff (no DAP expected)", "No Production in DAP", "Production but Not Paid in Bank",
-            "Matched", "Paid Less than DAP", "Paid High than DAP"]
+DUPLICATE = "Duplicate entry in Salary Sheet"
+# Possible remarks, in the order shown on the Remarks sheet
+OUTCOMES = ["Matched", "Paid Less than DAP", "Paid High than DAP", "Production but Not Paid in Bank",
+            "No Production in DAP", "Staff (no DAP expected)"]
 
 
 def base_remark(p, tol):
-    """'<Department> - <outcome>' from DAP earning vs bank transfer (attendance is not part of the remark)."""
+    """Remark from DAP earning vs bank transfer (no department, no attendance)."""
     if p.get("dup"):
-        return "Duplicate entry in Salary Sheet - check"
+        return DUPLICATE
     dept = str(p["department"] or p["sheet"] or "").strip()
-    label = dept.title() if dept else "Unassigned"
     if dept.upper() in STAFF_DEPTS and p["dap"] == NO_PROD:
-        out = OUTCOMES[0]
-    elif p["dap"] == NO_PROD:
-        out = OUTCOMES[1]
-    elif p["bank_amt"] == 0:
-        out = OUTCOMES[2]
-    elif abs(p["eff"]) <= tol:
-        out = OUTCOMES[3]
-    elif p["eff"] > 0:
-        out = OUTCOMES[4]
-    else:
-        out = OUTCOMES[5]
-    return ("Not in Employee Master; " if p.get("new") else "") + f"{label} - {out}"
+        return "Staff (no DAP expected)"
+    if p["dap"] == NO_PROD:
+        return "No Production in DAP"
+    if p["bank_amt"] == 0:
+        return "Production but Not Paid in Bank"
+    if abs(p["eff"]) <= tol:
+        return "Matched"
+    return "Paid Less than DAP" if p["eff"] > 0 else "Paid High than DAP"
 
 
 def remark_extra(p):
@@ -473,7 +469,7 @@ def write_workbook(people, unmatched, meta):
     ws.cell(row=1, column=8).comment = Comment("Paid days as per attendance PDF minus paid days as per salary sheet", "Audit")
     ws.cell(row=1, column=9).comment = Comment("Earn Salary - DAP minus Bank Transfer amount (0 when no production)", "Audit")
     ws.cell(row=1, column=10).comment = Comment(
-        f"<Department> - Matched (DAP vs bank within Rs {meta['tolerance']:,}) / Paid Less than DAP / Paid High than DAP / "
+        f"Matched (DAP vs bank within Rs {meta['tolerance']:,}) / Paid Less than DAP / Paid High than DAP / "
         "No Production in DAP / Staff. Bank details added when salary also went to another name's account.", "Audit")
 
     # ---------- Calculation backup
@@ -581,89 +577,27 @@ def write_workbook(people, unmatched, meta):
     for j, w in enumerate([34, 14, 30, 30, 34, 11], 1):
         wu.column_dimensions[get_column_letter(j)].width = w
 
-    # ---------- Remarks pivot
+    # ---------- Remarks pivot: Remarks | Counts
     wr = wb.create_sheet("Remarks", 1)
     bold = Font(name=FONT, bold=True)
-    wr.cell(row=1, column=1, value=f"Remarks summary - {meta['period']}").font = Font(name=FONT, bold=True, size=13)
-    wr.cell(row=2, column=1, value=f"Matched = DAP earning vs bank transfer within +/- Rs {meta['tolerance']:,}. "
-            "Paid Less = DAP earning higher than bank; Paid High = bank higher than DAP earning.").font = Font(name=FONT, italic=True)
-    keys = sorted({p["remark_base"] for p in people})
     R = "'Diamond Report'!$J:$J"
-    _header(wr, 4, ["Remarks", "Count", "Earn Salary - DAP", "Effiency - Bank trans - Salry DAP"], [52, 14, 16, 16, 16, 16, 16, 12])
+    keys = OUTCOMES + ([DUPLICATE] if any(p.get("dup") for p in people) else [])
+    _header(wr, 1, ["Remarks", "Counts"], [40, 12])
     wr.freeze_panes = None
     wr.auto_filter.ref = None
-    for i, k in enumerate(keys, 5):
+    for i, k in enumerate(keys, 2):
         wr.cell(row=i, column=1, value=k)
         wr.cell(row=i, column=2, value=f'=COUNTIF({R},A{i}&"*")')
-        wr.cell(row=i, column=3, value=f"=SUMIF({R},A{i}&\"*\",'Diamond Report'!$E:$E)")
-        wr.cell(row=i, column=4, value=f"=SUMIF({R},A{i}&\"*\",'Diamond Report'!$I:$I)")
-    t = 5 + len(keys)
+    t = 2 + len(keys)
     wr.cell(row=t, column=1, value="Grand Total")
-    for col in (2, 3, 4):
-        L = get_column_letter(col)
-        wr.cell(row=t, column=col, value=f"=SUM({L}5:{L}{t - 1})")
-    wr.cell(row=t + 1, column=1, value="Employees in Diamond Report")
-    wr.cell(row=t + 1, column=2, value="=COUNTA('Diamond Report'!$B:$B)-1")
+    wr.cell(row=t, column=2, value=f"=SUM(B2:B{t - 1})")
+    _body_style(wr, 2, t, 2)
+    for col in (1, 2):
+        wr.cell(row=t, column=col).font = bold
     wr.cell(row=t + 2, column=1, value=TRANSFER_OTHER)
     wr.cell(row=t + 2, column=2, value=f'=COUNTIF({R},"*{TRANSFER_OTHER}*")')
-    wr.cell(row=t + 2, column=3, value=f"=SUMIF({R},\"*{TRANSFER_OTHER}*\",'Diamond Report'!$E:$E)")
-    wr.cell(row=t + 2, column=4, value=f"=SUMIF({R},\"*{TRANSFER_OTHER}*\",'Diamond Report'!$I:$I)")
-    _body_style(wr, 5, t + 2, 4, {3: money, 4: money})
-    for row in (t, t + 1, t + 2):
-        for col in (1, 2, 3, 4):
-            wr.cell(row=row, column=col).font = bold
-
-    # pivot: department x outcome
-    top = t + 5
-    groups = sorted({str(p["department"] or p["sheet"] or "Unassigned") for p in people})
-    phdr = ["Department"] + OUTCOMES + ["Total", TRANSFER_OTHER]
-    for j, h in enumerate(phdr, 1):
-        c = wr.cell(row=top, column=j, value=h)
-        c.font, c.fill, c.border = bold, HDR_FILL, BORDER
-        c.alignment = Alignment(horizontal="center", wrap_text=True)
-    for i, g in enumerate(groups, top + 1):
-        wr.cell(row=i, column=1, value=g)
-        for j, k in enumerate(OUTCOMES, 2):
-            wr.cell(row=i, column=j, value=f'=COUNTIFS(Calculation!$C:$C,$A{i},{R},"* - {k}*")')
-        wr.cell(row=i, column=len(phdr) - 1, value=f"=SUM(B{i}:{get_column_letter(len(phdr) - 2)}{i})")
-        wr.cell(row=i, column=len(phdr), value=f'=COUNTIFS(Calculation!$C:$C,$A{i},{R},"*{TRANSFER_OTHER}*")')
-    gt = top + 1 + len(groups)
-    wr.cell(row=gt, column=1, value="Grand Total")
-    for j in range(2, len(phdr) + 1):
-        L = get_column_letter(j)
-        wr.cell(row=gt, column=j, value=f"=SUM({L}{top + 1}:{L}{gt - 1})")
-    _body_style(wr, top + 1, gt, len(phdr))
-    for j in range(1, len(phdr) + 1):
-        wr.cell(row=gt, column=j).font = bold
-
-    # salary paid to other-name accounts / shared account numbers
-    ob = [(p, b) for p in people for b in p["other_bank"]]
-    sa = [(p, a, o) for p in people for a, o in p["same_acc"]]
-    r0 = gt + 3
-    wr.cell(row=r0, column=1, value=f"{TRANSFER_OTHER} ({len(ob)})").font = Font(name=FONT, bold=True, size=12)
-    for j, h in enumerate(["Employee Name", "Emp Code", "Paid to (name in bank file)", "Account No", "Amount",
-                           "Paid in own name too?", "Net Salary (Salary Sheet)", "Linked by"], 1):
-        c = wr.cell(row=r0 + 1, column=j, value=h)
-        c.font, c.fill, c.border = bold, HDR_FILL, BORDER
-    for i, (p, b) in enumerate(ob, r0 + 2):
-        for j, v in enumerate([p["name"], p["code"], b["name"], ", ".join(b["accounts"]), b["amount"],
-                               "Yes" if p["bank"] else "No", p["net_sal"], b["basis"]], 1):
-            c = wr.cell(row=i, column=j, value=v)
-            c.font, c.border = Font(name=FONT), BORDER
-        wr.cell(row=i, column=5).number_format = money
-        wr.cell(row=i, column=7).number_format = money
-    r1 = r0 + 4 + len(ob)
-    wr.cell(row=r1, column=1, value=f"Same account number used for different names ({len(sa)})").font = Font(name=FONT, bold=True, size=12)
-    for j, h in enumerate(["Employee Name", "Emp Code", "Account No", "Also used for"], 1):
-        c = wr.cell(row=r1 + 1, column=j, value=h)
-        c.font, c.fill, c.border = bold, HDR_FILL, BORDER
-    for i, (p, a, o) in enumerate(sa, r1 + 2):
-        for j, v in enumerate([p["name"], p["code"], a, ", ".join(o)], 1):
-            c = wr.cell(row=i, column=j, value=v)
-            c.font, c.border = Font(name=FONT), BORDER
-    for j, w in enumerate([52, 16, 34, 22, 16, 16, 16, 12, 16], 1):
-        wr.column_dimensions[get_column_letter(j)].width = w
-    wr.row_dimensions[top].height = 45
+    _body_style(wr, t + 2, t + 2, 2)
+    wr.cell(row=t + 3, column=1, value="(also counted in a remark above)").font = Font(name=FONT, italic=True, color="808080")
 
     wb.calculation.fullCalcOnLoad = True
     buf = io.BytesIO()

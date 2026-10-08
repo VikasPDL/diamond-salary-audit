@@ -42,7 +42,7 @@ with st.sidebar:
     st.header("Settings")
     tolerance = st.number_input("'Matched' tolerance (Rs)", min_value=0, value=500, step=100,
                                 help="If |DAP earning − Bank transfer| is within this amount the remark says Matched.")
-    st.caption("Remarks: <Department> – Matched / Paid Less than DAP / Paid High than DAP / No Production in DAP / Staff. "
+    st.caption("Remarks: Matched / Paid Less than DAP / Paid High than DAP / No Production in DAP / Staff. "
                "If salary also went to another name's bank account, the name, A/c no. and amount are added.")
     st.markdown("---")
     st.markdown(
@@ -115,33 +115,12 @@ if "result" in st.session_state:
         view = main[main.apply(lambda r: q.upper() in f"{r['Employee Name']} {r['Remarks']}".upper(), axis=1)] if q else main
         st.dataframe(view, use_container_width=True, hide_index=True, height=520)
     with t2:
-        rem = pd.DataFrame({"Department": [str(p["department"] or p["sheet"] or "Unassigned") for p in people],
-                            "Remarks": base})
-        st.subheader("Count by remark")
-        cnt = rem["Remarks"].value_counts().sort_index()
+        cnt = pd.Series(base).value_counts().reindex(
+            [k for k in engine.OUTCOMES + [engine.DUPLICATE] if k in base], fill_value=0)
         cnt.loc["Grand Total"] = cnt.sum()
-        cnt.loc[engine.TRANSFER_OTHER] = sum(1 for p in people if p["other_bank"])
-        st.dataframe(cnt.rename("Count"), use_container_width=True)
-        st.subheader("Department × Remarks")
-        rem["Outcome"] = rem["Remarks"].map(lambda r: next((o for o in engine.OUTCOMES if r.endswith(o)), "Other"))
-        pv = pd.crosstab(rem["Department"], rem["Outcome"], margins=True, margins_name="Total")
-        pv = pv.reindex(columns=[c for c in engine.OUTCOMES + ["Other", "Total"] if c in pv.columns])
-        tr = pd.Series([str(p["department"] or p["sheet"] or "Unassigned") for p in people if p["other_bank"]],
-                       dtype=str).value_counts()
-        pv[engine.TRANSFER_OTHER] = tr.reindex(pv.index, fill_value=0)
-        pv.loc["Total", engine.TRANSFER_OTHER] = int(tr.sum())
-        st.dataframe(pv, use_container_width=True)
-        ob = [{"Employee": p["name"], "Emp Code": p["code"], "Paid to": b["name"],
-               "Account No": ", ".join(b["accounts"]), "Amount": b["amount"],
-               "Paid in own name too?": "Yes" if p["bank"] else "No", "Net Salary": round(p["net_sal"]),
-               "Linked by": b["basis"]} for p in people for b in p["other_bank"]]
-        st.subheader(f"{engine.TRANSFER_OTHER} ({len(ob)})")
-        st.dataframe(pd.DataFrame(ob), use_container_width=True, hide_index=True)
-        sa = [{"Employee": p["name"], "Emp Code": p["code"], "Account No": a, "Also used for": ", ".join(o)}
-              for p in people for a, o in p["same_acc"]]
-        if sa:
-            st.subheader(f"Same account number used for different names ({len(sa)})")
-            st.dataframe(pd.DataFrame(sa), use_container_width=True, hide_index=True)
+        table = cnt.rename_axis("Remarks").reset_index(name="Counts")
+        st.dataframe(table, use_container_width=True, hide_index=True)
+        st.write(f"**{engine.TRANSFER_OTHER}:** {sum(1 for p in people if p['other_bank'])} (also counted above)")
     with t3:
         att = pd.DataFrame([{
             "Emp Code": p["code"], "Employee Name": p["name"],
