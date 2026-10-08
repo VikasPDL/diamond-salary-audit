@@ -369,6 +369,8 @@ def build(master, salary_rows, bank, prod, pdf_emps, month_days, period, toleran
     return people, unmatched, meta
 
 
+TRANSFER_OTHER = "Transfer to Other Account"
+
 # Outcome part of the remark ("<Department> - <outcome>"), used for the pivot columns
 OUTCOMES = ["Staff (no DAP expected)", "No Production in DAP", "Production but Not Paid in Bank",
             "Matched", "Paid Less than DAP", "Paid High than DAP"]
@@ -399,10 +401,9 @@ def remark_extra(p):
     """Bank details appended to the remark: salary transferred to another person's account / shared account."""
     parts = []
     for b in p["other_bank"]:
-        lead = ("Salary also transferred to other person's A/c" if p["bank"]
-                else "Salary NOT transferred to own A/c - transferred to other person's A/c")
-        parts.append(f"{lead}: {b['name']} A/c {', '.join(b['accounts']) or '-'} Rs {b['amount']:,.0f} "
-                     f"(linked by {b['basis']})")
+        own = "own A/c also paid" if p["bank"] else "not paid in own A/c"
+        parts.append(f"{TRANSFER_OTHER} ({own}): {b['name']} A/c {', '.join(b['accounts']) or '-'} "
+                     f"Rs {b['amount']:,.0f} (linked by {b['basis']})")
     for acc, others in p["same_acc"]:
         parts.append(f"Same A/c {acc} also used for {', '.join(others)}")
     return "".join("; " + x for x in parts)
@@ -603,8 +604,10 @@ def write_workbook(people, unmatched, meta):
         wr.cell(row=t, column=col, value=f"=SUM({L}5:{L}{t - 1})")
     wr.cell(row=t + 1, column=1, value="Employees in Diamond Report")
     wr.cell(row=t + 1, column=2, value="=COUNTA('Diamond Report'!$B:$B)-1")
-    wr.cell(row=t + 2, column=1, value="Salary transferred to other person's A/c")
-    wr.cell(row=t + 2, column=2, value=f'=COUNTIF({R},"*other person\'s A/c*")')
+    wr.cell(row=t + 2, column=1, value=TRANSFER_OTHER)
+    wr.cell(row=t + 2, column=2, value=f'=COUNTIF({R},"*{TRANSFER_OTHER}*")')
+    wr.cell(row=t + 2, column=3, value=f"=SUMIF({R},\"*{TRANSFER_OTHER}*\",'Diamond Report'!$E:$E)")
+    wr.cell(row=t + 2, column=4, value=f"=SUMIF({R},\"*{TRANSFER_OTHER}*\",'Diamond Report'!$I:$I)")
     _body_style(wr, 5, t + 2, 4, {3: money, 4: money})
     for row in (t, t + 1, t + 2):
         for col in (1, 2, 3, 4):
@@ -613,7 +616,7 @@ def write_workbook(people, unmatched, meta):
     # pivot: department x outcome
     top = t + 5
     groups = sorted({str(p["department"] or p["sheet"] or "Unassigned") for p in people})
-    phdr = ["Department"] + OUTCOMES + ["Total"]
+    phdr = ["Department"] + OUTCOMES + ["Total", TRANSFER_OTHER]
     for j, h in enumerate(phdr, 1):
         c = wr.cell(row=top, column=j, value=h)
         c.font, c.fill, c.border = bold, HDR_FILL, BORDER
@@ -622,7 +625,8 @@ def write_workbook(people, unmatched, meta):
         wr.cell(row=i, column=1, value=g)
         for j, k in enumerate(OUTCOMES, 2):
             wr.cell(row=i, column=j, value=f'=COUNTIFS(Calculation!$C:$C,$A{i},{R},"* - {k}*")')
-        wr.cell(row=i, column=len(phdr), value=f"=SUM(B{i}:{get_column_letter(len(phdr) - 1)}{i})")
+        wr.cell(row=i, column=len(phdr) - 1, value=f"=SUM(B{i}:{get_column_letter(len(phdr) - 2)}{i})")
+        wr.cell(row=i, column=len(phdr), value=f'=COUNTIFS(Calculation!$C:$C,$A{i},{R},"*{TRANSFER_OTHER}*")')
     gt = top + 1 + len(groups)
     wr.cell(row=gt, column=1, value="Grand Total")
     for j in range(2, len(phdr) + 1):
@@ -636,7 +640,7 @@ def write_workbook(people, unmatched, meta):
     ob = [(p, b) for p in people for b in p["other_bank"]]
     sa = [(p, a, o) for p in people for a, o in p["same_acc"]]
     r0 = gt + 3
-    wr.cell(row=r0, column=1, value=f"Salary transferred to other person's bank account ({len(ob)})").font = Font(name=FONT, bold=True, size=12)
+    wr.cell(row=r0, column=1, value=f"{TRANSFER_OTHER} ({len(ob)})").font = Font(name=FONT, bold=True, size=12)
     for j, h in enumerate(["Employee Name", "Emp Code", "Paid to (name in bank file)", "Account No", "Amount",
                            "Paid in own name too?", "Net Salary (Salary Sheet)", "Linked by"], 1):
         c = wr.cell(row=r0 + 1, column=j, value=h)
@@ -657,7 +661,7 @@ def write_workbook(people, unmatched, meta):
         for j, v in enumerate([p["name"], p["code"], a, ", ".join(o)], 1):
             c = wr.cell(row=i, column=j, value=v)
             c.font, c.border = Font(name=FONT), BORDER
-    for j, w in enumerate([52, 16, 34, 22, 16, 16, 16, 12], 1):
+    for j, w in enumerate([52, 16, 34, 22, 16, 16, 16, 12, 16], 1):
         wr.column_dimensions[get_column_letter(j)].width = w
     wr.row_dimensions[top].height = 45
 
