@@ -39,11 +39,11 @@ st.caption("Upload the month's 4 files → get the audit Excel (DAP earning vs b
 
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.header("Remarks rule")
-    st.markdown("- **No Production** – no production in DAP\n"
-                "- **High Paid** – Diff - Attdance ≤ 0\n"
-                "- **OK** – rest\n\n"
-                "If salary also went to another name's bank account, the name, A/c no. and amount are added to the remark.")
+    st.header("Settings")
+    tolerance = st.number_input("'Matched' tolerance (Rs)", min_value=0, value=500, step=100,
+                                help="If |DAP earning − Bank transfer| is within this amount the remark says Matched.")
+    st.caption("Remarks: <Department> – Matched / Paid Less than DAP / Paid High than DAP / No Production in DAP / Staff. "
+               "If salary also went to another name's bank account, the name, A/c no. and amount are added.")
     st.markdown("---")
     st.markdown(
         "**Employee Master columns:** Emp Code, Employee Name, Designation, Department, Sheet Name, "
@@ -73,7 +73,7 @@ if st.button("▶ Generate Audit Report", type="primary", disabled=not ready):
                 prod_src = io.StringIO(pd.read_excel(prod_file).to_csv(index=False))
             else:
                 prod_src = prod_file
-            people, unmatched, meta, xlsx = engine.run(master_src, sal_file, bank_file, prod_src, pdf_file)
+            people, unmatched, meta, xlsx = engine.run(master_src, sal_file, bank_file, prod_src, pdf_file, tolerance)
         st.session_state["result"] = (people, unmatched, meta, xlsx)
     except Exception as exc:  # show the problem to the user instead of a stack trace
         st.session_state.pop("result", None)
@@ -93,12 +93,12 @@ if "result" in st.session_state:
 
     dap_total = sum(p["dap"] for p in people if p["dap"] != engine.NO_PROD)
     bank_total = sum(p["bank_amt"] for p in people)
-    base = [engine.base_remark(p["dap"], p["att_diff"]) for p in people]
+    base = [p["remark_base"] for p in people]
     m = st.columns(6)
     m[0].metric("Employees", len(people))
     m[1].metric("Earn Salary – DAP", f"₹{dap_total:,.0f}")
     m[2].metric("Bank transfer", f"₹{bank_total:,.0f}")
-    m[3].metric("High Paid", base.count("High Paid"))
+    m[3].metric("Paid High than DAP", sum(1 for b in base if b.endswith("Paid High than DAP")))
     m[4].metric("Paid to other-name A/c", sum(1 for p in people if p["other_bank"]))
     m[5].metric("Unmatched names", sum(len(v) for v in unmatched.values()))
 
@@ -118,12 +118,14 @@ if "result" in st.session_state:
         rem = pd.DataFrame({"Department": [str(p["department"] or p["sheet"] or "Unassigned") for p in people],
                             "Remarks": base})
         st.subheader("Count by remark")
-        cnt = rem["Remarks"].value_counts().reindex(engine.REMARKS, fill_value=0)
+        cnt = rem["Remarks"].value_counts().sort_index()
         cnt.loc["Grand Total"] = cnt.sum()
         st.dataframe(cnt.rename("Count"), use_container_width=True)
         st.subheader("Department × Remarks")
-        pv = pd.crosstab(rem["Department"], rem["Remarks"], margins=True, margins_name="Total")
-        st.dataframe(pv.reindex(columns=[c for c in engine.REMARKS + ["Total"] if c in pv.columns]), use_container_width=True)
+        rem["Outcome"] = rem["Remarks"].map(lambda r: next((o for o in engine.OUTCOMES if r.endswith(o)), "Other"))
+        pv = pd.crosstab(rem["Department"], rem["Outcome"], margins=True, margins_name="Total")
+        st.dataframe(pv.reindex(columns=[c for c in engine.OUTCOMES + ["Other", "Total"] if c in pv.columns]),
+                     use_container_width=True)
         ob = [{"Employee": p["name"], "Emp Code": p["code"], "Paid to": b["name"],
                "Account No": ", ".join(b["accounts"]), "Amount": b["amount"]} for p in people for b in p["other_bank"]]
         st.subheader(f"Salary paid to other-name bank account ({len(ob)})")

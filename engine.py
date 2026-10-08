@@ -327,7 +327,8 @@ def build(master, salary_rows, bank, prod, pdf_emps, month_days, period, toleran
         p["att_diff"] = p["att_pdf"] - p["att_sal"]
         p["eff"] = round(p["dap"] - p["bank_amt"], 2) if p["dap"] != NO_PROD else 0
         p["remark_extra"] = remark_extra(p)
-        p["remarks"] = base_remark(p["dap"], p["att_diff"]) + p["remark_extra"]
+        p["remark_base"] = base_remark(p, tolerance)
+        p["remarks"] = p["remark_base"] + p["remark_extra"]
 
     unmatched = {
         "pdf": [e for e in pdf_emps if id(e) not in used_pdf],
@@ -345,14 +346,30 @@ def build(master, salary_rows, bank, prod, pdf_emps, month_days, period, toleran
     return people, unmatched, meta
 
 
-REMARKS = ["High Paid", "OK", "No Production"]
+# Outcome part of the remark ("<Department> - <outcome>"), used for the pivot columns
+OUTCOMES = ["Staff (no DAP expected)", "No Production in DAP", "Production but Not Paid in Bank",
+            "Matched", "Paid Less than DAP", "Paid High than DAP"]
 
 
-def base_remark(dap, att_diff):
-    """No production in DAP -> No Production; Diff - Attendance <= 0 -> High Paid; else OK."""
-    if dap == NO_PROD:
-        return "No Production"
-    return "High Paid" if att_diff <= 0 else "OK"
+def base_remark(p, tol):
+    """'<Department> - <outcome>' from DAP earning vs bank transfer (attendance is not part of the remark)."""
+    if p.get("dup"):
+        return "Duplicate entry in Salary Sheet - check"
+    dept = str(p["department"] or p["sheet"] or "").strip()
+    label = dept.title() if dept else "Unassigned"
+    if dept.upper() in STAFF_DEPTS and p["dap"] == NO_PROD:
+        out = OUTCOMES[0]
+    elif p["dap"] == NO_PROD:
+        out = OUTCOMES[1]
+    elif p["bank_amt"] == 0:
+        out = OUTCOMES[2]
+    elif abs(p["eff"]) <= tol:
+        out = OUTCOMES[3]
+    elif p["eff"] > 0:
+        out = OUTCOMES[4]
+    else:
+        out = OUTCOMES[5]
+    return ("Not in Employee Master; " if p.get("new") else "") + f"{label} - {out}"
 
 
 def remark_extra(p):
@@ -419,9 +436,7 @@ def write_workbook(people, unmatched, meta):
         ws.cell(row=i, column=7, value=p["cts"])
         ws.cell(row=i, column=8, value=f"=Calculation!J{i}-Calculation!K{i}")
         ws.cell(row=i, column=9, value=f"=IF(ISNUMBER(E{i}),E{i}-Calculation!H{i},0)")
-        extra = p["remark_extra"].replace('"', "'")
-        ws.cell(row=i, column=10, value=f'=IF(ISNUMBER(E{i}),IF(H{i}<=0,"High Paid","OK"),"No Production")'
-                                        + (f'&"{extra}"' if extra else ""))
+        ws.cell(row=i, column=10, value=p["remarks"])
     last = len(people) + 1
     _body_style(ws, 2, last, len(hdr), {4: money, 5: money, 6: "#,##0", 7: "#,##0.00", 8: "0.0;-0.0;-", 9: money})
     for i, p in enumerate(people, 2):
@@ -430,8 +445,9 @@ def write_workbook(people, unmatched, meta):
                 ws.cell(row=i, column=j).fill = WARN_FILL
     ws.cell(row=1, column=8).comment = Comment("Paid days as per attendance PDF minus paid days as per salary sheet", "Audit")
     ws.cell(row=1, column=9).comment = Comment("Earn Salary - DAP minus Bank Transfer amount (0 when no production)", "Audit")
-    ws.cell(row=1, column=10).comment = Comment("No Production = no DAP production; High Paid = Diff - Attdance <= 0; "
-                                                "otherwise OK. Bank details added when salary also went to another name's account.", "Audit")
+    ws.cell(row=1, column=10).comment = Comment(
+        f"<Department> - Matched (DAP vs bank within Rs {meta['tolerance']:,}) / Paid Less than DAP / Paid High than DAP / "
+        "No Production in DAP / Staff. Bank details added when salary also went to another name's account.", "Audit")
 
     # ---------- Calculation backup
     wc = wb.create_sheet("Calculation")
@@ -542,17 +558,19 @@ def write_workbook(people, unmatched, meta):
     wr = wb.create_sheet("Remarks", 1)
     bold = Font(name=FONT, bold=True)
     wr.cell(row=1, column=1, value=f"Remarks summary - {meta['period']}").font = Font(name=FONT, bold=True, size=13)
-    wr.cell(row=2, column=1, value="No Production = no DAP production; High Paid = Diff - Attdance <= 0; OK = rest.").font = Font(name=FONT, italic=True)
+    wr.cell(row=2, column=1, value=f"Matched = DAP earning vs bank transfer within +/- Rs {meta['tolerance']:,}. "
+            "Paid Less = DAP earning higher than bank; Paid High = bank higher than DAP earning.").font = Font(name=FONT, italic=True)
+    keys = sorted({p["remark_base"] for p in people})
     R = "'Diamond Report'!$J:$J"
-    _header(wr, 4, ["Remarks", "Count", "Earn Salary - DAP", "Effiency - Bank trans - Salry DAP"], [36, 14, 16, 16, 16, 12])
+    _header(wr, 4, ["Remarks", "Count", "Earn Salary - DAP", "Effiency - Bank trans - Salry DAP"], [52, 14, 16, 16, 16, 16, 16, 12])
     wr.freeze_panes = None
     wr.auto_filter.ref = None
-    for i, k in enumerate(REMARKS, 5):
+    for i, k in enumerate(keys, 5):
         wr.cell(row=i, column=1, value=k)
         wr.cell(row=i, column=2, value=f'=COUNTIF({R},A{i}&"*")')
         wr.cell(row=i, column=3, value=f"=SUMIF({R},A{i}&\"*\",'Diamond Report'!$E:$E)")
         wr.cell(row=i, column=4, value=f"=SUMIF({R},A{i}&\"*\",'Diamond Report'!$I:$I)")
-    t = 5 + len(REMARKS)
+    t = 5 + len(keys)
     wr.cell(row=t, column=1, value="Grand Total")
     for col in (2, 3, 4):
         L = get_column_letter(col)
@@ -566,18 +584,18 @@ def write_workbook(people, unmatched, meta):
         for col in (1, 2, 3, 4):
             wr.cell(row=row, column=col).font = bold
 
-    # pivot: department x remark
+    # pivot: department x outcome
     top = t + 5
     groups = sorted({str(p["department"] or p["sheet"] or "Unassigned") for p in people})
-    phdr = ["Department"] + REMARKS + ["Total"]
+    phdr = ["Department"] + OUTCOMES + ["Total"]
     for j, h in enumerate(phdr, 1):
         c = wr.cell(row=top, column=j, value=h)
         c.font, c.fill, c.border = bold, HDR_FILL, BORDER
         c.alignment = Alignment(horizontal="center", wrap_text=True)
     for i, g in enumerate(groups, top + 1):
         wr.cell(row=i, column=1, value=g)
-        for j, k in enumerate(REMARKS, 2):
-            wr.cell(row=i, column=j, value=f'=COUNTIFS(Calculation!$C:$C,$A{i},{R},"{k}*")')
+        for j, k in enumerate(OUTCOMES, 2):
+            wr.cell(row=i, column=j, value=f'=COUNTIFS(Calculation!$C:$C,$A{i},{R},"* - {k}*")')
         wr.cell(row=i, column=len(phdr), value=f"=SUM(B{i}:{get_column_letter(len(phdr) - 1)}{i})")
     gt = top + 1 + len(groups)
     wr.cell(row=gt, column=1, value="Grand Total")
@@ -610,8 +628,9 @@ def write_workbook(people, unmatched, meta):
         for j, v in enumerate([p["name"], p["code"], a, ", ".join(o)], 1):
             c = wr.cell(row=i, column=j, value=v)
             c.font, c.border = Font(name=FONT), BORDER
-    for j, w in enumerate([36, 14, 34, 22, 16, 12], 1):
+    for j, w in enumerate([52, 16, 34, 22, 16, 16, 16, 12], 1):
         wr.column_dimensions[get_column_letter(j)].width = w
+    wr.row_dimensions[top].height = 45
 
     wb.calculation.fullCalcOnLoad = True
     buf = io.BytesIO()
