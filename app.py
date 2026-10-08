@@ -40,22 +40,20 @@ st.caption("Upload the month's 4 files → get the audit Excel (DAP earning vs b
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
     st.header("Settings")
-    master_up = st.file_uploader("Employee Master (optional – replaces the built-in one)", type=["xlsx"])
-    if master_up is None:
-        if DEFAULT_MASTER.exists():
-            st.success(f"Using built-in master: {DEFAULT_MASTER.name}")
-        else:
-            st.error("No built-in Employee Master found – please upload one.")
     tolerance = st.number_input("'Matched' tolerance (Rs)", min_value=0, value=500, step=100,
                                 help="If |DAP earning − Bank transfer| is within this amount the remark says Matched.")
     st.markdown("---")
     st.markdown(
-        "**Master columns used:** Emp Code, Employee Name, Designation, Department, Sheet Name, "
+        "**Employee Master columns:** Emp Code, Employee Name, Designation, Department, Sheet Name, "
         "Salary Master, Name in Bank Paid file, Name in Employee Production file.\n\n"
-        "To fix a name that doesn't match, fill the *Name in …* column in the master and upload it here."
+        "To fix a name that doesn't match, fill the *Name in …* column in the master and upload it again."
     )
 
 # ---------------------------------------------------------------- uploads
+master_label = "0. Employee Master  (Employee Master - for App Upload.xlsx)"
+if DEFAULT_MASTER.exists():
+    master_label += " – optional, built-in master is used if empty"
+master_up = st.file_uploader(master_label, type=["xlsx"])
 c1, c2 = st.columns(2)
 with c1:
     pdf_file = st.file_uploader("1. Attendance PDF  (e.g. DIAMOND AUG-26.pdf)", type=["pdf"])
@@ -80,7 +78,8 @@ if st.button("▶ Generate Audit Report", type="primary", disabled=not ready):
         st.error(f"Could not process the files: {exc}")
         st.exception(exc)
 elif not ready:
-    st.info("Upload all 4 files to enable the button.")
+    st.info("Upload the Employee Master and the 4 monthly files to enable the button."
+            if not DEFAULT_MASTER.exists() else "Upload all 4 files to enable the button.")
 
 # ---------------------------------------------------------------- results
 if "result" in st.session_state:
