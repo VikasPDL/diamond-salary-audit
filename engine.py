@@ -288,21 +288,44 @@ def build(master, salary_rows, bank, prod, pdf_emps, month_days, period, toleran
 
     people = master + extra
 
-    # --- salary paid into a bank account under another name
-    # e.g. 'MAMTA RAJAN KASHALKAR' (unlinked bank name) shares 2+ words with 'RAJAN BHALCHANDRA KASHALKAR'
+    # --- salary transferred into another person's bank account
+    # Bank names not linked to any employee are tied to an employee by
+    #   1) name: 2+ words in common, spelling-tolerant (MAMTA RAJAN KASHALKAR -> RAJAN B. KASHALKAR,
+    #      AMIT MADHUKAR PALNEKAR -> AKSHAY MADHUKAR PELNEKAR)
+    #   2) amount: equals the net salary of exactly one employee who got nothing in own name
     for p in people:
         p["other_bank"], p["same_acc"] = [], []
+
+    def words(n):
+        return [w for w in norm(n).split() if len(w) > 2]
+
+    def common_words(a, b):
+        wb_ = words(b)
+        return sum(1 for w in set(words(a))
+                   if any(w == x or difflib.SequenceMatcher(None, w, x).ratio() >= 0.85 for x in wb_))
+
+    def link(i, b, k, basis):
+        people[i]["other_bank"].append(dict(b, basis=basis))
+        used_bank.add(k)
+
     for k, b in bank.items():
         if k in used_bank:
             continue
-        words = {w for w in norm(b["name"]).split() if len(w) > 2}
-        scored = [(len(words & {w for w in norm(p["name"]).split() if len(w) > 2}), i)
-                  for i, p in enumerate(people) if not p.get("dup")]
+        scored = [(common_words(b["name"], p["name"]), i) for i, p in enumerate(people) if not p.get("dup")]
         best = max((sc for sc, _ in scored), default=0)
         hits = [i for sc, i in scored if sc == best]
+        if best >= 2 and len(hits) > 1:  # tie: keep only employees with no payment in own name
+            hits = [i for i in hits if not people[i]["bank"]]
         if best >= 2 and len(hits) == 1:
-            people[hits[0]]["other_bank"].append(b)
-            used_bank.add(k)
+            link(hits[0], b, k, "name")
+    for k, b in bank.items():
+        if k in used_bank:
+            continue
+        hits = [i for i, p in enumerate(people)
+                if not p.get("dup") and not p["bank"] and not p["other_bank"] and p["sal"]
+                and abs(p["sal"]["net"] - b["amount"]) <= 1]
+        if len(hits) == 1:
+            link(hits[0], b, k, "amount = net salary")
     # one account number used for different names
     acc_names = defaultdict(set)
     for b in bank.values():
@@ -373,10 +396,13 @@ def base_remark(p, tol):
 
 
 def remark_extra(p):
-    """Bank details appended to the remark: salary paid to another name / shared account number."""
+    """Bank details appended to the remark: salary transferred to another person's account / shared account."""
     parts = []
     for b in p["other_bank"]:
-        parts.append(f"Salary also paid to other A/c: {b['name']} A/c {', '.join(b['accounts']) or '-'} Rs {b['amount']:,.0f}")
+        lead = ("Salary also transferred to other person's A/c" if p["bank"]
+                else "Salary NOT transferred to own A/c - transferred to other person's A/c")
+        parts.append(f"{lead}: {b['name']} A/c {', '.join(b['accounts']) or '-'} Rs {b['amount']:,.0f} "
+                     f"(linked by {b['basis']})")
     for acc, others in p["same_acc"]:
         parts.append(f"Same A/c {acc} also used for {', '.join(others)}")
     return "".join("; " + x for x in parts)
@@ -577,8 +603,8 @@ def write_workbook(people, unmatched, meta):
         wr.cell(row=t, column=col, value=f"=SUM({L}5:{L}{t - 1})")
     wr.cell(row=t + 1, column=1, value="Employees in Diamond Report")
     wr.cell(row=t + 1, column=2, value="=COUNTA('Diamond Report'!$B:$B)-1")
-    wr.cell(row=t + 2, column=1, value="Salary also paid to other-name A/c")
-    wr.cell(row=t + 2, column=2, value=f'=COUNTIF({R},"*other A/c*")')
+    wr.cell(row=t + 2, column=1, value="Salary transferred to other person's A/c")
+    wr.cell(row=t + 2, column=2, value=f'=COUNTIF({R},"*other person\'s A/c*")')
     _body_style(wr, 5, t + 2, 4, {3: money, 4: money})
     for row in (t, t + 1, t + 2):
         for col in (1, 2, 3, 4):
@@ -610,15 +636,18 @@ def write_workbook(people, unmatched, meta):
     ob = [(p, b) for p in people for b in p["other_bank"]]
     sa = [(p, a, o) for p in people for a, o in p["same_acc"]]
     r0 = gt + 3
-    wr.cell(row=r0, column=1, value=f"Salary paid to other-name bank account ({len(ob)})").font = Font(name=FONT, bold=True, size=12)
-    for j, h in enumerate(["Employee Name", "Emp Code", "Paid to (name in bank file)", "Account No", "Amount"], 1):
+    wr.cell(row=r0, column=1, value=f"Salary transferred to other person's bank account ({len(ob)})").font = Font(name=FONT, bold=True, size=12)
+    for j, h in enumerate(["Employee Name", "Emp Code", "Paid to (name in bank file)", "Account No", "Amount",
+                           "Paid in own name too?", "Net Salary (Salary Sheet)", "Linked by"], 1):
         c = wr.cell(row=r0 + 1, column=j, value=h)
         c.font, c.fill, c.border = bold, HDR_FILL, BORDER
     for i, (p, b) in enumerate(ob, r0 + 2):
-        for j, v in enumerate([p["name"], p["code"], b["name"], ", ".join(b["accounts"]), b["amount"]], 1):
+        for j, v in enumerate([p["name"], p["code"], b["name"], ", ".join(b["accounts"]), b["amount"],
+                               "Yes" if p["bank"] else "No", p["net_sal"], b["basis"]], 1):
             c = wr.cell(row=i, column=j, value=v)
             c.font, c.border = Font(name=FONT), BORDER
         wr.cell(row=i, column=5).number_format = money
+        wr.cell(row=i, column=7).number_format = money
     r1 = r0 + 4 + len(ob)
     wr.cell(row=r1, column=1, value=f"Same account number used for different names ({len(sa)})").font = Font(name=FONT, bold=True, size=12)
     for j, h in enumerate(["Employee Name", "Emp Code", "Account No", "Also used for"], 1):
