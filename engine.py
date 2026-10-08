@@ -143,7 +143,7 @@ def read_salary_sheet(file):
 
 
 def read_bank(file):
-    """Bank transfer file -> {normalised name: (original name, amount)} using the master sheet only."""
+    """Bank transfer file -> {normalised name: {name, amount, accounts}} using the first sheet with a header."""
     wb = openpyxl.load_workbook(file, data_only=True, read_only=True)
     totals = {}
     for ws in wb.worksheets:
@@ -157,12 +157,18 @@ def read_bank(file):
         if hdr_i is None:
             continue  # numbered split sheets have no header -> skip (they duplicate the main sheet)
         cn, ca = hdr.index("NAME"), hdr.index("AMOUNT")
+        cacc = next((j for j, h in enumerate(hdr) if "ACCOUNT" in h), None)
         for r in rows[hdr_i + 1:]:
             if ca >= len(r) or not isinstance(r[cn], str) or not isinstance(r[ca], (int, float)):
                 continue
             k = norm(r[cn])
-            prev = totals.get(k, (r[cn].strip(), 0))
-            totals[k] = (prev[0], prev[1] + r[ca])
+            rec = totals.setdefault(k, {"name": r[cn].strip(), "amount": 0, "accounts": []})
+            rec["amount"] += r[ca]
+            acc = str(r[cacc]).strip() if cacc is not None and r[cacc] is not None else ""
+            if not re.fullmatch(r"\d{6,}", acc):
+                acc = ""  # placeholders such as 'NEFT' are not account numbers
+            if acc and acc not in rec["accounts"]:
+                rec["accounts"].append(acc)
         break  # only the first sheet with a header
     return totals
 
@@ -282,23 +288,52 @@ def build(master, salary_rows, bank, prod, pdf_emps, month_days, period, toleran
 
     people = master + extra
 
+    # --- salary paid into a bank account under another name
+    # e.g. 'MAMTA RAJAN KASHALKAR' (unlinked bank name) shares 2+ words with 'RAJAN BHALCHANDRA KASHALKAR'
+    for p in people:
+        p["other_bank"], p["same_acc"] = [], []
+    for k, b in bank.items():
+        if k in used_bank:
+            continue
+        words = {w for w in norm(b["name"]).split() if len(w) > 2}
+        scored = [(len(words & {w for w in norm(p["name"]).split() if len(w) > 2}), i)
+                  for i, p in enumerate(people) if not p.get("dup")]
+        best = max((sc for sc, _ in scored), default=0)
+        hits = [i for sc, i in scored if sc == best]
+        if best >= 2 and len(hits) == 1:
+            people[hits[0]]["other_bank"].append(b)
+            used_bank.add(k)
+    # one account number used for different names
+    acc_names = defaultdict(set)
+    for b in bank.values():
+        for a in b["accounts"]:
+            acc_names[a].add(b["name"])
+    for p in people:
+        for b in ([p["bank"]] if p["bank"] else []) + p["other_bank"]:
+            for a in b["accounts"]:
+                others = sorted(acc_names[a] - {b["name"]})
+                if others:
+                    p["same_acc"].append((a, others))
+
     # --- figures + remarks
     for p in people:
         p["dap"] = round(p["prod"]["labour"], 2) if p["prod"] else NO_PROD
         p["pcs"] = int(p["prod"]["pcs"]) if p["prod"] else 0
         p["cts"] = round(p["prod"]["cts"], 2) if p["prod"] else 0
-        p["bank_amt"] = p["bank"][1] if p["bank"] else 0
+        p["bank_amt"] = (p["bank"]["amount"] if p["bank"] else 0) + sum(b["amount"] for b in p["other_bank"])
         p["att_pdf"] = p["pdf"]["paid"] if p["pdf"] else 0
         p["att_sal"] = p["sal"]["paid"] if p["sal"] else 0
         p["net_sal"] = round(p["sal"]["net"], 2) if p["sal"] else 0
         p["att_diff"] = p["att_pdf"] - p["att_sal"]
         p["eff"] = round(p["dap"] - p["bank_amt"], 2) if p["dap"] != NO_PROD else 0
-        p["remarks"] = remark(p, tolerance)
+        p["remark_extra"] = remark_extra(p)
+        p["remarks"] = base_remark(p["dap"], p["att_diff"]) + p["remark_extra"]
 
     unmatched = {
         "pdf": [e for e in pdf_emps if id(e) not in used_pdf],
         "prod": [dict(v, key=k) for k, v in prod.items() if k not in used_prod],
-        "bank": [{"name": v[0], "amount": v[1]} for k, v in bank.items() if k not in used_bank],
+        "bank": [{"name": v["name"], "amount": v["amount"], "account": ", ".join(v["accounts"])}
+                 for k, v in bank.items() if k not in used_bank],
     }
     # suggestions for unmatched production / bank names
     all_names = [p["name"] for p in people]
@@ -310,29 +345,24 @@ def build(master, salary_rows, bank, prod, pdf_emps, month_days, period, toleran
     return people, unmatched, meta
 
 
-def remark(p, tol):
-    dept = str(p["department"] or p["sheet"] or "").strip()
-    label = dept.title() if dept else "Unassigned"
+REMARKS = ["High Paid", "OK", "No Production"]
+
+
+def base_remark(dap, att_diff):
+    """No production in DAP -> No Production; Diff - Attendance <= 0 -> High Paid; else OK."""
+    if dap == NO_PROD:
+        return "No Production"
+    return "High Paid" if att_diff <= 0 else "OK"
+
+
+def remark_extra(p):
+    """Bank details appended to the remark: salary paid to another name / shared account number."""
     parts = []
-    if p.get("dup"):
-        return "Duplicate entry in Salary Sheet - check"
-    if p.get("new"):
-        parts.append("Not in Employee Master")
-    if dept.upper() in STAFF_DEPTS and p["dap"] == NO_PROD:
-        parts.append(f"{label} - Staff (no DAP expected)")
-    elif p["dap"] == NO_PROD:
-        parts.append(f"{label} - No Production in DAP")
-    elif p["bank_amt"] == 0:
-        parts.append(f"{label} - Production but Not Paid in Bank")
-    elif abs(p["eff"]) <= tol:
-        parts.append(f"{label} - Matched")
-    elif p["eff"] > 0:
-        parts.append(f"{label} - Paid Less than DAP")
-    else:
-        parts.append(f"{label} - Paid High than DAP")
-    if p["att_diff"]:
-        parts.append(f"Attendance diff {p['att_diff']:+g} days")
-    return "; ".join(parts)
+    for b in p["other_bank"]:
+        parts.append(f"Salary also paid to other A/c: {b['name']} A/c {', '.join(b['accounts']) or '-'} Rs {b['amount']:,.0f}")
+    for acc, others in p["same_acc"]:
+        parts.append(f"Same A/c {acc} also used for {', '.join(others)}")
+    return "".join("; " + x for x in parts)
 
 
 # ---------------------------------------------------------------- workbook
@@ -389,7 +419,9 @@ def write_workbook(people, unmatched, meta):
         ws.cell(row=i, column=7, value=p["cts"])
         ws.cell(row=i, column=8, value=f"=Calculation!J{i}-Calculation!K{i}")
         ws.cell(row=i, column=9, value=f"=IF(ISNUMBER(E{i}),E{i}-Calculation!H{i},0)")
-        ws.cell(row=i, column=10, value=p["remarks"])
+        extra = p["remark_extra"].replace('"', "'")
+        ws.cell(row=i, column=10, value=f'=IF(ISNUMBER(E{i}),IF(H{i}<=0,"High Paid","OK"),"No Production")'
+                                        + (f'&"{extra}"' if extra else ""))
     last = len(people) + 1
     _body_style(ws, 2, last, len(hdr), {4: money, 5: money, 6: "#,##0", 7: "#,##0.00", 8: "0.0;-0.0;-", 9: money})
     for i, p in enumerate(people, 2):
@@ -398,15 +430,17 @@ def write_workbook(people, unmatched, meta):
                 ws.cell(row=i, column=j).fill = WARN_FILL
     ws.cell(row=1, column=8).comment = Comment("Paid days as per attendance PDF minus paid days as per salary sheet", "Audit")
     ws.cell(row=1, column=9).comment = Comment("Earn Salary - DAP minus Bank Transfer amount (0 when no production)", "Audit")
+    ws.cell(row=1, column=10).comment = Comment("No Production = no DAP production; High Paid = Diff - Attdance <= 0; "
+                                                "otherwise OK. Bank details added when salary also went to another name's account.", "Audit")
 
     # ---------- Calculation backup
     wc = wb.create_sheet("Calculation")
     chdr = ["Emp Code", "Employee Name", "Department", "Salary Sheet Tab", "Salary Master",
-            "Earn Salary - DAP", "Net Salary (Salary Sheet)", "Bank Transfer", "Diff - Salary Sheet vs Bank",
+            "Earn Salary - DAP", "Net Salary (Salary Sheet)", "Bank Transfer (incl. other-name A/c)", "Diff - Salary Sheet vs Bank",
             "Paid Days (Attendance PDF)", "Paid Days (Salary Sheet)", "OT Hrs (PDF)", "Pcs Done", "Cts Done"]
     _header(wc, 1, chdr, [9, 34, 24, 16, 12, 14, 14, 14, 14, 12, 12, 10, 10, 11])
     for i, p in enumerate(people, 2):
-        vals = [p["code"], p["name"], p["department"], p["sheet"], p["salary_master"], p["dap"], p["net_sal"],
+        vals = [p["code"], p["name"], p["department"] or p["sheet"] or "Unassigned", p["sheet"], p["salary_master"], p["dap"], p["net_sal"],
                 p["bank_amt"], f"=G{i}-H{i}", p["att_pdf"], p["att_sal"],
                 p["pdf"]["ot_hrs"] if p["pdf"] else 0, p["pcs"], p["cts"]]
         for j, v in enumerate(vals, 1):
@@ -462,12 +496,14 @@ def write_workbook(people, unmatched, meta):
             "Name in Bank File", "Bank Match", "Name in Attendance PDF", "Attendance Match", "Status"]
     _header(wm, 1, mhdr, [9, 32, 22, 16, 32, 14, 32, 15, 32, 15, 32, 14, 30])
     for i, p in enumerate(people, 2):
-        missing = [lbl for lbl, k in (("Salary", "sal"), ("Bank", "bank"), ("Attendance", "pdf")) if not p[k]]
+        missing = [lbl for lbl, k in (("Salary", "sal"), ("Bank", "bank"), ("Attendance", "pdf"))
+                   if not p[k] and not (k == "bank" and p["other_bank"])]
         status = "Duplicate line in Salary Sheet" if p.get("dup") else "Not in Employee Master" if p.get("new") else ("All matched" if not missing else "Missing: " + ", ".join(missing))
-        vals = [p["code"], p["name"], p["department"], p["sheet"],
+        vals = [p["code"], p["name"], p["department"] or p["sheet"] or "Unassigned", p["sheet"],
                 p["sal"]["name"] if p["sal"] else "", p["sal_how"] or "Not found",
                 p["prod"]["name"] if p["prod"] else "", p["prod_how"] or "No production",
-                p["bank"][0] if p["bank"] else "", p["bank_how"] or "Not found",
+                "; ".join(([p["bank"]["name"]] if p["bank"] else []) + [b["name"] + " (other name)" for b in p["other_bank"]]),
+                p["bank_how"] or ("Other name" if p["other_bank"] else "Not found"),
                 p["pdf"]["name"] if p["pdf"] else "", p.get("pdf_how") or "Not found", status]
         for j, v in enumerate(vals, 1):
             wm.cell(row=i, column=j, value=v)
@@ -482,8 +518,9 @@ def write_workbook(people, unmatched, meta):
         ("Production (DAP) names not linked to any employee", ["Name in Production", "Labour (Rs)", "Pcs", "Cts", "Suggested Master Name", "Similarity"],
          [[u["name"], round(u["labour"], 2), u["pcs"], round(u["cts"], 2), u["suggest"] or "", round(u["score"], 2)]
           for u in sorted(unmatched["prod"], key=lambda u: -u["labour"])]),
-        ("Bank transfer names not linked to any employee", ["Name in Bank File", "Amount", "Suggested Master Name", "Similarity"],
-         [[u["name"], u["amount"], u["suggest"] or "", round(u["score"], 2)] for u in sorted(unmatched["bank"], key=lambda u: -u["amount"])]),
+        ("Bank transfer names not linked to any employee", ["Name in Bank File", "Amount", "Account No", "Suggested Master Name", "Similarity"],
+         [[u["name"], u["amount"], u["account"], u["suggest"] or "", round(u["score"], 2)]
+          for u in sorted(unmatched["bank"], key=lambda u: -u["amount"])]),
         ("Attendance PDF employees not linked to any employee", ["Emp Code", "Name in PDF", "Department", "Paid Days"],
          [[e["code"], e["name"], e["department"], e["paid"]] for e in unmatched["pdf"]]),
     ):
@@ -501,26 +538,80 @@ def write_workbook(people, unmatched, meta):
     for j, w in enumerate([34, 14, 30, 30, 34, 11], 1):
         wu.column_dimensions[get_column_letter(j)].width = w
 
-    # ---------- Remarks summary
-    wsum = wb.create_sheet("Summary", 1)
-    wsum.cell(row=1, column=1, value=f"Diamond salary audit - {meta['period']}").font = Font(name=FONT, bold=True, size=13)
-    wsum.cell(row=2, column=1, value=f"'Matched' tolerance: +/- Rs {meta['tolerance']:,} between DAP earning and bank transfer").font = Font(name=FONT, italic=True)
-    _header(wsum, 4, ["Remark", "Count", "Earn Salary - DAP", "Effiency (DAP - Bank)"], [55, 10, 18, 20])
-    wsum.freeze_panes = None
-    keys = sorted({p["remarks"].split(";")[0] for p in people})
-    for i, k in enumerate(keys, 5):
-        wsum.cell(row=i, column=1, value=k)
-        wsum.cell(row=i, column=2, value=f"=COUNTIF('Diamond Report'!$J:$J,A{i}&\"*\")")
-        wsum.cell(row=i, column=3, value=f"=SUMIF('Diamond Report'!$J:$J,A{i}&\"*\",'Diamond Report'!$E:$E)")
-        wsum.cell(row=i, column=4, value=f"=SUMIF('Diamond Report'!$J:$J,A{i}&\"*\",'Diamond Report'!$I:$I)")
-    end = 4 + len(keys)
-    _body_style(wsum, 5, end, 4, {3: money, 4: money})
-    t = end + 1
-    wsum.cell(row=t, column=1, value="Total").font = Font(name=FONT, bold=True)
+    # ---------- Remarks pivot
+    wr = wb.create_sheet("Remarks", 1)
+    bold = Font(name=FONT, bold=True)
+    wr.cell(row=1, column=1, value=f"Remarks summary - {meta['period']}").font = Font(name=FONT, bold=True, size=13)
+    wr.cell(row=2, column=1, value="No Production = no DAP production; High Paid = Diff - Attdance <= 0; OK = rest.").font = Font(name=FONT, italic=True)
+    R = "'Diamond Report'!$J:$J"
+    _header(wr, 4, ["Remarks", "Count", "Earn Salary - DAP", "Effiency - Bank trans - Salry DAP"], [36, 14, 16, 16, 16, 12])
+    wr.freeze_panes = None
+    wr.auto_filter.ref = None
+    for i, k in enumerate(REMARKS, 5):
+        wr.cell(row=i, column=1, value=k)
+        wr.cell(row=i, column=2, value=f'=COUNTIF({R},A{i}&"*")')
+        wr.cell(row=i, column=3, value=f"=SUMIF({R},A{i}&\"*\",'Diamond Report'!$E:$E)")
+        wr.cell(row=i, column=4, value=f"=SUMIF({R},A{i}&\"*\",'Diamond Report'!$I:$I)")
+    t = 5 + len(REMARKS)
+    wr.cell(row=t, column=1, value="Grand Total")
     for col in (2, 3, 4):
         L = get_column_letter(col)
-        c = wsum.cell(row=t, column=col, value=f"=SUM({L}5:{L}{end})")
-        c.font, c.number_format = Font(name=FONT, bold=True), (money if col > 2 else "0")
+        wr.cell(row=t, column=col, value=f"=SUM({L}5:{L}{t - 1})")
+    wr.cell(row=t + 1, column=1, value="Employees in Diamond Report")
+    wr.cell(row=t + 1, column=2, value="=COUNTA('Diamond Report'!$B:$B)-1")
+    wr.cell(row=t + 2, column=1, value="Salary also paid to other-name A/c")
+    wr.cell(row=t + 2, column=2, value=f'=COUNTIF({R},"*other A/c*")')
+    _body_style(wr, 5, t + 2, 4, {3: money, 4: money})
+    for row in (t, t + 1, t + 2):
+        for col in (1, 2, 3, 4):
+            wr.cell(row=row, column=col).font = bold
+
+    # pivot: department x remark
+    top = t + 5
+    groups = sorted({str(p["department"] or p["sheet"] or "Unassigned") for p in people})
+    phdr = ["Department"] + REMARKS + ["Total"]
+    for j, h in enumerate(phdr, 1):
+        c = wr.cell(row=top, column=j, value=h)
+        c.font, c.fill, c.border = bold, HDR_FILL, BORDER
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+    for i, g in enumerate(groups, top + 1):
+        wr.cell(row=i, column=1, value=g)
+        for j, k in enumerate(REMARKS, 2):
+            wr.cell(row=i, column=j, value=f'=COUNTIFS(Calculation!$C:$C,$A{i},{R},"{k}*")')
+        wr.cell(row=i, column=len(phdr), value=f"=SUM(B{i}:{get_column_letter(len(phdr) - 1)}{i})")
+    gt = top + 1 + len(groups)
+    wr.cell(row=gt, column=1, value="Grand Total")
+    for j in range(2, len(phdr) + 1):
+        L = get_column_letter(j)
+        wr.cell(row=gt, column=j, value=f"=SUM({L}{top + 1}:{L}{gt - 1})")
+    _body_style(wr, top + 1, gt, len(phdr))
+    for j in range(1, len(phdr) + 1):
+        wr.cell(row=gt, column=j).font = bold
+
+    # salary paid to other-name accounts / shared account numbers
+    ob = [(p, b) for p in people for b in p["other_bank"]]
+    sa = [(p, a, o) for p in people for a, o in p["same_acc"]]
+    r0 = gt + 3
+    wr.cell(row=r0, column=1, value=f"Salary paid to other-name bank account ({len(ob)})").font = Font(name=FONT, bold=True, size=12)
+    for j, h in enumerate(["Employee Name", "Emp Code", "Paid to (name in bank file)", "Account No", "Amount"], 1):
+        c = wr.cell(row=r0 + 1, column=j, value=h)
+        c.font, c.fill, c.border = bold, HDR_FILL, BORDER
+    for i, (p, b) in enumerate(ob, r0 + 2):
+        for j, v in enumerate([p["name"], p["code"], b["name"], ", ".join(b["accounts"]), b["amount"]], 1):
+            c = wr.cell(row=i, column=j, value=v)
+            c.font, c.border = Font(name=FONT), BORDER
+        wr.cell(row=i, column=5).number_format = money
+    r1 = r0 + 4 + len(ob)
+    wr.cell(row=r1, column=1, value=f"Same account number used for different names ({len(sa)})").font = Font(name=FONT, bold=True, size=12)
+    for j, h in enumerate(["Employee Name", "Emp Code", "Account No", "Also used for"], 1):
+        c = wr.cell(row=r1 + 1, column=j, value=h)
+        c.font, c.fill, c.border = bold, HDR_FILL, BORDER
+    for i, (p, a, o) in enumerate(sa, r1 + 2):
+        for j, v in enumerate([p["name"], p["code"], a, ", ".join(o)], 1):
+            c = wr.cell(row=i, column=j, value=v)
+            c.font, c.border = Font(name=FONT), BORDER
+    for j, w in enumerate([36, 14, 34, 22, 16, 12], 1):
+        wr.column_dimensions[get_column_letter(j)].width = w
 
     wb.calculation.fullCalcOnLoad = True
     buf = io.BytesIO()

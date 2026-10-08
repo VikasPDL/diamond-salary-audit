@@ -39,9 +39,11 @@ st.caption("Upload the month's 4 files → get the audit Excel (DAP earning vs b
 
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
-    st.header("Settings")
-    tolerance = st.number_input("'Matched' tolerance (Rs)", min_value=0, value=500, step=100,
-                                help="If |DAP earning − Bank transfer| is within this amount the remark says Matched.")
+    st.header("Remarks rule")
+    st.markdown("- **No Production** – no production in DAP\n"
+                "- **High Paid** – Diff - Attdance ≤ 0\n"
+                "- **OK** – rest\n\n"
+                "If salary also went to another name's bank account, the name, A/c no. and amount are added to the remark.")
     st.markdown("---")
     st.markdown(
         "**Employee Master columns:** Emp Code, Employee Name, Designation, Department, Sheet Name, "
@@ -71,7 +73,7 @@ if st.button("▶ Generate Audit Report", type="primary", disabled=not ready):
                 prod_src = io.StringIO(pd.read_excel(prod_file).to_csv(index=False))
             else:
                 prod_src = prod_file
-            people, unmatched, meta, xlsx = engine.run(master_src, sal_file, bank_file, prod_src, pdf_file, tolerance)
+            people, unmatched, meta, xlsx = engine.run(master_src, sal_file, bank_file, prod_src, pdf_file)
         st.session_state["result"] = (people, unmatched, meta, xlsx)
     except Exception as exc:  # show the problem to the user instead of a stack trace
         st.session_state.pop("result", None)
@@ -91,12 +93,14 @@ if "result" in st.session_state:
 
     dap_total = sum(p["dap"] for p in people if p["dap"] != engine.NO_PROD)
     bank_total = sum(p["bank_amt"] for p in people)
-    m = st.columns(5)
+    base = [engine.base_remark(p["dap"], p["att_diff"]) for p in people]
+    m = st.columns(6)
     m[0].metric("Employees", len(people))
     m[1].metric("Earn Salary – DAP", f"₹{dap_total:,.0f}")
     m[2].metric("Bank transfer", f"₹{bank_total:,.0f}")
-    m[3].metric("Attendance mismatches", sum(1 for p in people if p["att_diff"]))
-    m[4].metric("Unmatched names", sum(len(v) for v in unmatched.values()))
+    m[3].metric("High Paid", base.count("High Paid"))
+    m[4].metric("Paid to other-name A/c", sum(1 for p in people if p["other_bank"]))
+    m[5].metric("Unmatched names", sum(len(v) for v in unmatched.values()))
 
     main = pd.DataFrame([{
         "Emp Code": p["code"], "Employee Name": p["name"], "Designation": p["designation"],
@@ -105,16 +109,30 @@ if "result" in st.session_state:
         "Effiency - Bank trans - Salry DAP": p["eff"], "Remarks": p["remarks"]} for p in people])
     main["Earn Salary - DAP"] = main["Earn Salary - DAP"].astype(str)
 
-    t1, t2, t3, t4, t5 = st.tabs(["Main report", "Summary", "Attendance", "Name matching", "Unmatched names"])
+    t1, t2, t3, t4, t5 = st.tabs(["Main report", "Remarks", "Attendance", "Name matching", "Unmatched names"])
     with t1:
         q = st.text_input("Search name / remark")
         view = main[main.apply(lambda r: q.upper() in f"{r['Employee Name']} {r['Remarks']}".upper(), axis=1)] if q else main
         st.dataframe(view, use_container_width=True, hide_index=True, height=520)
     with t2:
-        s = main.assign(Group=main["Remarks"].str.split(";").str[0]).groupby("Group").agg(
-            Count=("Employee Name", "size"), Efficiency=("Effiency - Bank trans - Salry DAP", "sum")
-        ).sort_values("Count", ascending=False)
-        st.dataframe(s, use_container_width=True)
+        rem = pd.DataFrame({"Department": [str(p["department"] or p["sheet"] or "Unassigned") for p in people],
+                            "Remarks": base})
+        st.subheader("Count by remark")
+        cnt = rem["Remarks"].value_counts().reindex(engine.REMARKS, fill_value=0)
+        cnt.loc["Grand Total"] = cnt.sum()
+        st.dataframe(cnt.rename("Count"), use_container_width=True)
+        st.subheader("Department × Remarks")
+        pv = pd.crosstab(rem["Department"], rem["Remarks"], margins=True, margins_name="Total")
+        st.dataframe(pv.reindex(columns=[c for c in engine.REMARKS + ["Total"] if c in pv.columns]), use_container_width=True)
+        ob = [{"Employee": p["name"], "Emp Code": p["code"], "Paid to": b["name"],
+               "Account No": ", ".join(b["accounts"]), "Amount": b["amount"]} for p in people for b in p["other_bank"]]
+        st.subheader(f"Salary paid to other-name bank account ({len(ob)})")
+        st.dataframe(pd.DataFrame(ob), use_container_width=True, hide_index=True)
+        sa = [{"Employee": p["name"], "Emp Code": p["code"], "Account No": a, "Also used for": ", ".join(o)}
+              for p in people for a, o in p["same_acc"]]
+        if sa:
+            st.subheader(f"Same account number used for different names ({len(sa)})")
+            st.dataframe(pd.DataFrame(sa), use_container_width=True, hide_index=True)
     with t3:
         att = pd.DataFrame([{
             "Emp Code": p["code"], "Employee Name": p["name"],
@@ -127,7 +145,7 @@ if "result" in st.session_state:
     with t4:
         nm = pd.DataFrame([{
             "Emp Code": p["code"], "Master Name": p["name"], "Salary Sheet": p["sal"]["name"] if p["sal"] else "",
-            "Production": p["prod"]["name"] if p["prod"] else "", "Bank": p["bank"][0] if p["bank"] else "",
+            "Production": p["prod"]["name"] if p["prod"] else "", "Bank": "; ".join(([p["bank"]["name"]] if p["bank"] else []) + [b["name"] + " (other name)" for b in p["other_bank"]]),
             "Attendance PDF": p["pdf"]["name"] if p["pdf"] else "", "PDF match": p.get("pdf_how", ""),
         } for p in people])
         st.dataframe(nm, use_container_width=True, hide_index=True, height=480)
