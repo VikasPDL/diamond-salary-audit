@@ -445,30 +445,32 @@ def write_workbook(people, unmatched, meta):
     # ---------- Sheet 1: main view
     ws = wb.active
     ws.title = "Diamond Report"
-    hdr = ["Emp Code", "Employee Name", "Designation", "Salary Master", "Earn Salary - DAP", "Pcs Done",
-           "Cts Done", "Diff - Attdance", "Effiency - Bank trans - Salry DAP", "Remarks"]
-    _header(ws, 1, hdr, [9, 34, 22, 12, 15, 10, 11, 11, 17, 55])
+    hdr = ["Emp Code", "Employee Name", "Designation", "Salary Master", "Bank Transfer", "Earn Salary - DAP",
+           "Pcs Done", "Cts Done", "Diff - Attdance", "Effiency - Bank trans - Salry DAP", "Remarks"]
+    _header(ws, 1, hdr, [9, 34, 22, 12, 13, 15, 10, 11, 11, 17, 55])
     # Supporting figures referenced by the formulas live on the 'Calculation' sheet (same row order)
     for i, p in enumerate(people, 2):
         ws.cell(row=i, column=1, value=p["code"])
         ws.cell(row=i, column=2, value=p["name"])
         ws.cell(row=i, column=3, value=p["designation"])
         ws.cell(row=i, column=4, value=p["salary_master"])
-        ws.cell(row=i, column=5, value=p["dap"])
-        ws.cell(row=i, column=6, value=p["pcs"])
-        ws.cell(row=i, column=7, value=p["cts"])
-        ws.cell(row=i, column=8, value=f"=Calculation!J{i}-Calculation!K{i}")
-        ws.cell(row=i, column=9, value=f"=IF(ISNUMBER(E{i}),E{i}-Calculation!H{i},0)")
-        ws.cell(row=i, column=10, value=p["remarks"])
+        ws.cell(row=i, column=5, value=f"=Calculation!H{i}")
+        ws.cell(row=i, column=6, value=p["dap"])
+        ws.cell(row=i, column=7, value=p["pcs"])
+        ws.cell(row=i, column=8, value=p["cts"])
+        ws.cell(row=i, column=9, value=f"=Calculation!J{i}-Calculation!K{i}")
+        ws.cell(row=i, column=10, value=f"=IF(ISNUMBER(F{i}),F{i}-E{i},0)")
+        ws.cell(row=i, column=11, value=p["remarks"])
     last = len(people) + 1
-    _body_style(ws, 2, last, len(hdr), {4: money, 5: money, 6: "#,##0", 7: "#,##0.00", 8: "0.0;-0.0;-", 9: money})
+    _body_style(ws, 2, last, len(hdr), {4: money, 5: money, 6: money, 7: "#,##0", 8: "#,##0.00", 9: "0.0;-0.0;-", 10: money})
     for i, p in enumerate(people, 2):
         if p.get("new"):
             for j in range(1, len(hdr) + 1):
                 ws.cell(row=i, column=j).fill = WARN_FILL
-    ws.cell(row=1, column=8).comment = Comment("Paid days as per attendance PDF minus paid days as per salary sheet", "Audit")
-    ws.cell(row=1, column=9).comment = Comment("Earn Salary - DAP minus Bank Transfer amount (0 when no production)", "Audit")
-    ws.cell(row=1, column=10).comment = Comment(
+    ws.cell(row=1, column=5).comment = Comment("Amount in the bank transfer file, incl. transfers to another person's account", "Audit")
+    ws.cell(row=1, column=9).comment = Comment("Paid days as per attendance PDF minus paid days as per salary sheet", "Audit")
+    ws.cell(row=1, column=10).comment = Comment("Earn Salary - DAP minus Bank Transfer amount (0 when no production)", "Audit")
+    ws.cell(row=1, column=11).comment = Comment(
         f"Matched (DAP vs bank within Rs {meta['tolerance']:,}) / Paid Less than DAP / Paid High than DAP / "
         "No Production in DAP / Staff. Bank details added when salary also went to another name's account.", "Audit")
 
@@ -580,7 +582,7 @@ def write_workbook(people, unmatched, meta):
     # ---------- Remarks pivot: Remarks | Counts
     wr = wb.create_sheet("Remarks", 1)
     bold = Font(name=FONT, bold=True)
-    R = "'Diamond Report'!$J:$J"
+    R = "'Diamond Report'!$K:$K"
     keys = OUTCOMES + ([DUPLICATE] if any(p.get("dup") for p in people) else [])
     _header(wr, 1, ["Remarks", "Counts"], [40, 12])
     wr.freeze_panes = None

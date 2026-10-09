@@ -104,7 +104,7 @@ if "result" in st.session_state:
 
     main = pd.DataFrame([{
         "Emp Code": p["code"], "Employee Name": p["name"], "Designation": p["designation"],
-        "Salary Master": p["salary_master"], "Earn Salary - DAP": p["dap"], "Pcs Done": p["pcs"],
+        "Salary Master": p["salary_master"], "Bank Transfer": p["bank_amt"], "Earn Salary - DAP": p["dap"], "Pcs Done": p["pcs"],
         "Cts Done": p["cts"], "Diff - Attdance": p["att_diff"],
         "Effiency - Bank trans - Salry DAP": p["eff"], "Remarks": p["remarks"]} for p in people])
     main["Earn Salary - DAP"] = main["Earn Salary - DAP"].astype(str)
